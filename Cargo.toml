@@ -1,0 +1,8 @@
+[package]
+name = "pstidy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pstidy"
+path = "src/main.rs"
