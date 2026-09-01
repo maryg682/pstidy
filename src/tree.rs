@@ -118,3 +118,96 @@ fn write_node(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_basic_line() {
+        let records = parse("1 0 init");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, 1);
+        assert_eq!(records[0].ppid, 0);
+        assert_eq!(records[0].command, "init");
+    }
+
+    #[test]
+    fn parse_tolerates_whitespace_blanks_and_comments() {
+        let input = "\n# a comment\n  810   1     sshd  \n\n1  0  init\n";
+        let records = parse(input);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].pid, 810);
+        assert_eq!(records[0].ppid, 1);
+        assert_eq!(records[0].command, "sshd");
+        assert_eq!(records[1].pid, 1);
+    }
+
+    #[test]
+    fn parse_joins_multi_word_command() {
+        let records = parse("42 1 /usr/bin/env python3 -m http.server");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "/usr/bin/env python3 -m http.server");
+    }
+
+    #[test]
+    fn parse_defaults_missing_command_to_question_mark() {
+        let records = parse("1 0");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "?");
+    }
+
+    #[test]
+    fn parse_skips_lines_missing_numeric_fields() {
+        let input = "not a pid line\n1\n1 also-not-numeric foo\n2 0 ok\n";
+        let records = parse(input);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, 2);
+    }
+
+    #[test]
+    fn format_single_root_no_children() {
+        let records = parse("1 0 init");
+        assert_eq!(format(&records), "init (1)\n");
+    }
+
+    #[test]
+    fn format_nested_tree_matches_readme_example() {
+        let input = "810 1 sshd\n1 0 init\n2200 810 bash\n2350 2200 vim\n900 1 cron\n";
+        let records = parse(input);
+        let expected = "init (1)\n\
+                         ├── sshd (810)\n\
+                         │   └── bash (2200)\n\
+                         │       └── vim (2350)\n\
+                         └── cron (900)\n";
+        assert_eq!(format(&records), expected);
+    }
+
+    #[test]
+    fn format_sorts_roots_and_siblings_by_pid() {
+        let input = "50 0 c\n10 0 a\n30 0 b\n";
+        let records = parse(input);
+        let expected = "a (10)\nb (30)\nc (50)\n";
+        assert_eq!(format(&records), expected);
+    }
+
+    #[test]
+    fn format_treats_missing_parent_as_root() {
+        // ppid 999 was never given its own line, so this becomes a root.
+        let records = parse("5 999 orphan");
+        assert_eq!(format(&records), "orphan (5)\n");
+    }
+
+    #[test]
+    fn format_treats_self_parent_as_root() {
+        let records = parse("7 7 loopy");
+        assert_eq!(format(&records), "loopy (7)\n");
+    }
+
+    #[test]
+    fn format_keeps_first_of_duplicate_pid() {
+        let input = "1 0 init\n1 0 impostor\n";
+        let records = parse(input);
+        assert_eq!(format(&records), "init (1)\n");
+    }
+}
