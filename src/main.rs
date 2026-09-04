@@ -6,7 +6,15 @@ use std::process::ExitCode;
 mod tree;
 
 fn main() -> ExitCode {
-    let paths: Vec<String> = env::args().skip(1).collect();
+    let mut ascii = false;
+    let mut paths: Vec<String> = Vec::new();
+    for arg in env::args().skip(1) {
+        if arg == "--ascii" {
+            ascii = true;
+        } else {
+            paths.push(arg);
+        }
+    }
 
     let input = match read_input(&paths) {
         Ok(s) => s,
@@ -22,7 +30,12 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    print!("{}", tree::format(&records));
+    let output = if ascii {
+        tree::format_ascii(&records)
+    } else {
+        tree::format(&records)
+    };
+    print!("{}", output);
     ExitCode::SUCCESS
 }
 

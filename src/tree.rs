@@ -42,9 +42,43 @@ pub fn parse(input: &str) -> Vec<Record> {
     records
 }
 
-/// Renders records as a tree, ├──/└── style, sorted by pid at every
-/// level so the same input always produces the same output.
+/// Connector glyphs used to draw the tree. Unicode is the default; ascii
+/// exists for terminals/fonts/log viewers that mangle box-drawing chars.
+struct Connectors {
+    branch: &'static str,
+    last_branch: &'static str,
+    vertical: &'static str,
+    blank: &'static str,
+}
+
+const UNICODE_CONNECTORS: Connectors = Connectors {
+    branch: "├── ",
+    last_branch: "└── ",
+    vertical: "│   ",
+    blank: "    ",
+};
+
+const ASCII_CONNECTORS: Connectors = Connectors {
+    branch: "|-- ",
+    last_branch: "`-- ",
+    vertical: "|   ",
+    blank: "    ",
+};
+
+/// Renders records as a tree, ├──/└── style by default (or ascii, see
+/// `format_ascii`), sorted by pid at every level so the same input
+/// always produces the same output.
 pub fn format(records: &[Record]) -> String {
+    format_with(records, &UNICODE_CONNECTORS)
+}
+
+/// Same as `format`, but draws connectors with plain ascii characters
+/// instead of unicode box-drawing glyphs.
+pub fn format_ascii(records: &[Record]) -> String {
+    format_with(records, &ASCII_CONNECTORS)
+}
+
+fn format_with(records: &[Record], connectors: &Connectors) -> String {
     let mut seen = HashSet::new();
     let mut unique: Vec<&Record> = Vec::new();
     for r in records {
@@ -77,7 +111,7 @@ pub fn format(records: &[Record]) -> String {
     let mut out = String::new();
     for (i, root) in roots.iter().enumerate() {
         let is_last = i + 1 == roots.len();
-        write_node(*root, "", is_last, true, &by_pid, &children, &mut out);
+        write_node(*root, "", is_last, true, &by_pid, &children, connectors, &mut out);
     }
     out
 }
@@ -89,6 +123,7 @@ fn write_node(
     is_root: bool,
     by_pid: &HashMap<u32, &Record>,
     children: &HashMap<u32, Vec<u32>>,
+    connectors: &Connectors,
     out: &mut String,
 ) {
     let record = match by_pid.get(&pid) {
@@ -98,7 +133,7 @@ fn write_node(
 
     if !is_root {
         out.push_str(prefix);
-        out.push_str(if is_last { "└── " } else { "├── " });
+        out.push_str(if is_last { connectors.last_branch } else { connectors.branch });
     }
     out.push_str(&record.command);
     out.push_str(" (");
@@ -108,13 +143,17 @@ fn write_node(
     let child_prefix = if is_root {
         String::new()
     } else {
-        format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+        format!(
+            "{}{}",
+            prefix,
+            if is_last { connectors.blank } else { connectors.vertical }
+        )
     };
 
     if let Some(kids) = children.get(&pid) {
         for (i, kid) in kids.iter().enumerate() {
             let last = i + 1 == kids.len();
-            write_node(*kid, &child_prefix, last, false, by_pid, children, out);
+            write_node(*kid, &child_prefix, last, false, by_pid, children, connectors, out);
         }
     }
 }
@@ -209,5 +248,16 @@ mod tests {
         let input = "1 0 init\n1 0 impostor\n";
         let records = parse(input);
         assert_eq!(format(&records), "init (1)\n");
+    }
+
+    #[test]
+    fn format_ascii_uses_plain_connectors() {
+        let input = "810 1 sshd\n1 0 init\n2200 810 bash\n900 1 cron\n";
+        let records = parse(input);
+        let expected = "init (1)\n\
+                         |-- sshd (810)\n\
+                         |   `-- bash (2200)\n\
+                         `-- cron (900)\n";
+        assert_eq!(format_ascii(&records), expected);
     }
 }

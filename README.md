@@ -49,6 +49,14 @@ ps -eo pid,ppid,comm --no-headers | pstidy
 
 Multiple files are concatenated in the order given.
 
+Pass `--ascii` to draw the tree with plain `|`, `-`, and `` ` `` characters
+instead of unicode box-drawing glyphs, for terminals, fonts, or log
+viewers that mangle them:
+
+```
+pstidy --ascii processes.txt
+```
+
 ## Output
 
 The example input above becomes:
