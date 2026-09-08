@@ -33,6 +33,15 @@ This is exactly the shape you get from:
 ps -eo pid,ppid,comm --no-headers
 ```
 
+`ps -ef` output (with its `UID PID PPID C STIME TTY TIME CMD` header row and
+extra columns) also works - pstidy checks the first content line for a
+header naming PID, PPID, and CMD/COMMAND, and if found, uses those column
+positions instead of assuming pid/ppid come first:
+
+```
+ps -ef | pstidy
+```
+
 ## Usage
 
 From a file:

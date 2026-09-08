@@ -6,12 +6,50 @@ pub struct Record {
     pub command: String,
 }
 
-/// Parses "pid ppid command..." lines, tolerating extra whitespace,
-/// blank lines, and '#' comments. Lines that don't have at least a
-/// numeric pid and ppid are skipped rather than treated as errors,
-/// since real ps/pstree dumps often carry a header row or stray notes.
+/// Column positions of pid, ppid, and the start of the command within a
+/// whitespace-split line. The bare "pid ppid command" format is fixed
+/// (0, 1, 2); a `ps -ef` style header shifts these around (e.g. UID
+/// comes first) so the layout is detected from the header row instead
+/// of assumed.
+struct Layout {
+    pid_idx: usize,
+    ppid_idx: usize,
+    cmd_idx: usize,
+}
+
+impl Layout {
+    fn bare() -> Layout {
+        Layout { pid_idx: 0, ppid_idx: 1, cmd_idx: 2 }
+    }
+}
+
+/// Recognizes a `ps -ef`/`ps -efl` style header row by finding PID, PPID,
+/// and CMD/COMMAND columns. Matching is case-insensitive and exact per
+/// field, so a data line with a literal "pid" token can't be mistaken
+/// for a header - PPID and CMD would also have to line up, which real
+/// process data won't do.
+fn detect_header(line: &str) -> Option<Layout> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let pid_idx = fields.iter().position(|f| f.eq_ignore_ascii_case("pid"))?;
+    let ppid_idx = fields.iter().position(|f| f.eq_ignore_ascii_case("ppid"))?;
+    let cmd_idx = fields
+        .iter()
+        .position(|f| f.eq_ignore_ascii_case("cmd") || f.eq_ignore_ascii_case("command"))?;
+    Some(Layout { pid_idx, ppid_idx, cmd_idx })
+}
+
+/// Parses process records, tolerating extra whitespace, blank lines, and
+/// '#' comments. Lines that don't have at least a numeric pid and ppid
+/// at the expected columns are skipped rather than treated as errors,
+/// since real ps/pstree dumps often carry stray notes.
+///
+/// The column layout defaults to "pid ppid command" (what
+/// `ps -eo pid,ppid,comm --no-headers` produces), but if the first
+/// content line looks like a `ps -ef` header, its column order is used
+/// for the rest of the input instead.
 pub fn parse(input: &str) -> Vec<Record> {
     let mut records = Vec::new();
+    let mut layout: Option<Layout> = None;
 
     for line in input.lines() {
         let line = line.trim();
@@ -19,17 +57,31 @@ pub fn parse(input: &str) -> Vec<Record> {
             continue;
         }
 
-        let mut fields = line.split_whitespace();
-        let pid = match fields.next().and_then(|s| s.parse().ok()) {
+        if layout.is_none() {
+            if let Some(header_layout) = detect_header(line) {
+                layout = Some(header_layout);
+                // the header row itself carries no process data
+                continue;
+            }
+            layout = Some(Layout::bare());
+        }
+        let layout = layout.as_ref().unwrap();
+
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let pid = match fields.get(layout.pid_idx).and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
-        let ppid = match fields.next().and_then(|s| s.parse().ok()) {
+        let ppid = match fields.get(layout.ppid_idx).and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
 
-        let command: String = fields.collect::<Vec<_>>().join(" ");
+        let command = if layout.cmd_idx < fields.len() {
+            fields[layout.cmd_idx..].join(" ")
+        } else {
+            String::new()
+        };
         let command = if command.is_empty() {
             "?".to_string()
         } else {
@@ -202,6 +254,39 @@ mod tests {
         let records = parse(input);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].pid, 2);
+    }
+
+    #[test]
+    fn parse_detects_ps_ef_header_and_reorders_columns() {
+        let input = "UID        PID  PPID  C STIME TTY          TIME CMD\n\
+                      root         1     0  0 08:00 ?        00:00:01 /sbin/init\n\
+                      root       810     1  0 08:00 ?        00:00:00 /usr/sbin/sshd\n";
+        let records = parse(input);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].pid, 1);
+        assert_eq!(records[0].ppid, 0);
+        assert_eq!(records[0].command, "/sbin/init");
+        assert_eq!(records[1].pid, 810);
+        assert_eq!(records[1].ppid, 1);
+        assert_eq!(records[1].command, "/usr/sbin/sshd");
+    }
+
+    #[test]
+    fn parse_ps_ef_header_is_case_insensitive_and_accepts_command_column() {
+        let input = "uid pid ppid command\nroot 1 0 init\n";
+        let records = parse(input);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, 1);
+        assert_eq!(records[0].command, "init");
+    }
+
+    #[test]
+    fn format_renders_ps_ef_input_as_tree() {
+        let input = "UID   PID  PPID CMD\n\
+                      root    1     0 init\n\
+                      root  810     1 sshd\n";
+        let records = parse(input);
+        assert_eq!(format(&records), "init (1)\n└── sshd (810)\n");
     }
 
     #[test]
