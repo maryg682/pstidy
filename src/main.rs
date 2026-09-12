@@ -30,6 +30,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    report_diagnostics(&tree::diagnose(&records));
+
     let output = if ascii {
         tree::format_ascii(&records)
     } else {
@@ -37,6 +39,33 @@ fn main() -> ExitCode {
     };
     print!("{}", output);
     ExitCode::SUCCESS
+}
+
+/// Prints warnings for input problems that `format`/`format_ascii` would
+/// otherwise paper over silently (treating them as roots, or dropping
+/// cycle members from the tree entirely).
+fn report_diagnostics(diagnostics: &tree::Diagnostics) {
+    if diagnostics.is_empty() {
+        return;
+    }
+    for pid in &diagnostics.self_parented {
+        eprintln!("pstidy: warning: pid {} is its own parent, treated as a root", pid);
+    }
+    for (pid, ppid) in &diagnostics.missing_parent {
+        eprintln!(
+            "pstidy: warning: pid {} has ppid {} which is not present in the input, treated as a root",
+            pid, ppid
+        );
+    }
+    if !diagnostics.cycles.is_empty() {
+        let pids = diagnostics
+            .cycles
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("pstidy: warning: pids {} form a ppid cycle and were omitted from the tree", pids);
+    }
 }
 
 /// With no file arguments, reads stdin so the tool can sit in a pipeline

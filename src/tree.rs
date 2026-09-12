@@ -130,7 +130,18 @@ pub fn format_ascii(records: &[Record]) -> String {
     format_with(records, &ASCII_CONNECTORS)
 }
 
-fn format_with(records: &[Record], connectors: &Connectors) -> String {
+/// Deduplicates by pid (first occurrence wins) and splits records into a
+/// parent-to-children map plus the list of roots - a record is a root if
+/// its parent is missing from the input (pid 0, a ppid we were never
+/// given a line for, or its own pid).
+struct Built<'a> {
+    unique: Vec<&'a Record>,
+    pids: HashSet<u32>,
+    children: HashMap<u32, Vec<u32>>,
+    roots: Vec<u32>,
+}
+
+fn build(records: &[Record]) -> Built {
     let mut seen = HashSet::new();
     let mut unique: Vec<&Record> = Vec::new();
     for r in records {
@@ -144,8 +155,6 @@ fn format_with(records: &[Record], connectors: &Connectors) -> String {
     let mut roots: Vec<u32> = Vec::new();
 
     for r in &unique {
-        // A record is a root if its parent is missing from the input
-        // (pid 0, or a ppid we were never given a line for).
         if r.ppid == r.pid || !pids.contains(&r.ppid) {
             roots.push(r.pid);
         } else {
@@ -158,14 +167,77 @@ fn format_with(records: &[Record], connectors: &Connectors) -> String {
         kids.sort_unstable();
     }
 
-    let by_pid: HashMap<u32, &Record> = unique.iter().map(|r| (r.pid, *r)).collect();
+    Built { unique, pids, children, roots }
+}
+
+fn format_with(records: &[Record], connectors: &Connectors) -> String {
+    let built = build(records);
+    let by_pid: HashMap<u32, &Record> = built.unique.iter().map(|r| (r.pid, *r)).collect();
 
     let mut out = String::new();
-    for (i, root) in roots.iter().enumerate() {
-        let is_last = i + 1 == roots.len();
-        write_node(*root, "", is_last, true, &by_pid, &children, connectors, &mut out);
+    for (i, root) in built.roots.iter().enumerate() {
+        let is_last = i + 1 == built.roots.len();
+        write_node(*root, "", is_last, true, &by_pid, &built.children, connectors, &mut out);
     }
     out
+}
+
+/// Problems found in the input that a plain tree render would otherwise
+/// hide: pids that name themselves as their own parent, pids whose ppid
+/// doesn't match anything else in the input, and ppid cycles (pid A's
+/// ancestry loops back through pid A without ever reaching a root). All
+/// three are treated as roots or dropped silently by `format`, so this
+/// exists to let a caller surface them instead.
+pub struct Diagnostics {
+    pub self_parented: Vec<u32>,
+    pub missing_parent: Vec<(u32, u32)>,
+    pub cycles: Vec<u32>,
+}
+
+impl Diagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.self_parented.is_empty() && self.missing_parent.is_empty() && self.cycles.is_empty()
+    }
+}
+
+pub fn diagnose(records: &[Record]) -> Diagnostics {
+    let built = build(records);
+
+    let mut self_parented = Vec::new();
+    let mut missing_parent = Vec::new();
+    for r in &built.unique {
+        if r.ppid == r.pid {
+            self_parented.push(r.pid);
+        } else if !built.pids.contains(&r.ppid) {
+            missing_parent.push((r.pid, r.ppid));
+        }
+    }
+    self_parented.sort_unstable();
+    missing_parent.sort_unstable();
+
+    // Any pid not reachable from a root by walking down `children` is
+    // stuck in a ppid cycle - every node in a cycle has exactly one
+    // outgoing ppid edge, and none of them lead back to a root, so
+    // `format` never visits them either.
+    let mut reachable: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = built.roots.clone();
+    while let Some(pid) = stack.pop() {
+        if reachable.insert(pid) {
+            if let Some(kids) = built.children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+    }
+
+    let mut cycles: Vec<u32> = built
+        .pids
+        .iter()
+        .copied()
+        .filter(|p| !reachable.contains(p))
+        .collect();
+    cycles.sort_unstable();
+
+    Diagnostics { self_parented, missing_parent, cycles }
 }
 
 fn write_node(
@@ -333,6 +405,52 @@ mod tests {
         let input = "1 0 init\n1 0 impostor\n";
         let records = parse(input);
         assert_eq!(format(&records), "init (1)\n");
+    }
+
+    #[test]
+    fn diagnose_reports_nothing_for_clean_input() {
+        let records = parse("1 0 init\n2 1 sshd\n");
+        let diag = diagnose(&records);
+        assert!(diag.is_empty());
+    }
+
+    #[test]
+    fn diagnose_reports_self_parented_pid() {
+        let records = parse("7 7 loopy");
+        let diag = diagnose(&records);
+        assert_eq!(diag.self_parented, vec![7]);
+        assert!(diag.missing_parent.is_empty());
+        assert!(diag.cycles.is_empty());
+    }
+
+    #[test]
+    fn diagnose_reports_missing_parent() {
+        let records = parse("5 999 orphan");
+        let diag = diagnose(&records);
+        assert_eq!(diag.missing_parent, vec![(5, 999)]);
+        assert!(diag.self_parented.is_empty());
+        assert!(diag.cycles.is_empty());
+    }
+
+    #[test]
+    fn diagnose_reports_mutual_cycle() {
+        // 1 and 2 name each other as parent, so neither ever reaches a root.
+        let records = parse("1 2 a\n2 1 b\n");
+        let diag = diagnose(&records);
+        assert_eq!(diag.cycles, vec![1, 2]);
+        assert!(diag.self_parented.is_empty());
+        assert!(diag.missing_parent.is_empty());
+        // format() silently drops cycle members rather than looping forever.
+        assert_eq!(format(&records), "");
+    }
+
+    #[test]
+    fn diagnose_reports_cycle_with_a_tail_hanging_off_it() {
+        // 3's ancestry runs 3 -> 2 -> 1 -> 2, looping through the 1/2 cycle,
+        // so all three pids are unreachable from any root.
+        let records = parse("1 2 a\n2 1 b\n3 2 c\n");
+        let diag = diagnose(&records);
+        assert_eq!(diag.cycles, vec![1, 2, 3]);
     }
 
     #[test]

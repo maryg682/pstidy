@@ -83,6 +83,22 @@ pid present in the input - that covers both real init processes and
 partial dumps where a parent got cut off. Output is always sorted by
 pid, so the same input produces the same tree every time.
 
+pstidy also checks the ppid relationships for problems that would
+otherwise be invisible in the tree, and prints a warning per issue to
+stderr without failing the run:
+
+- a pid that lists itself as its own parent
+- a pid whose ppid doesn't match anything else in the input (this is
+  also what makes it a root, per the rule above)
+- a ppid cycle, where following parents in a circle never reaches a
+  root - those pids can't be placed in a tree at all and are left out
+  of the output
+
+```
+$ printf '1 2 a\n2 1 b\n' | pstidy
+pstidy: warning: pids 1, 2 form a ppid cycle and were omitted from the tree
+```
+
 ## Building
 
 Standard library only, no dependencies:
